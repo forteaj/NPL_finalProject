@@ -70,6 +70,7 @@ tok = BPETokenizer()
 @torch.no_grad()
 def get_last_logits(prompt: str):
     """
+
        Runs a forward pass of the model on the given prompt and
        returns the logits corresponding to the prediction of the next token.
 
@@ -111,16 +112,19 @@ def topk_next_tokens(last_logits, tokenizer, k=20):
         toke = tokenizer.decode(torch.tensor([tid]))
         print(f"{i:2d}. {repr(toke):>12}  p={p:.4f}  id={tid}")
 
-
+'''
 prompt_clean = "Michelle Jones was a top-notch student. Michelle"
 prompt_corrupted = "Michelle Smith was a top-notch student. Michelle"
 
 # Run the model on both inputs and extract next-token logits
 last_logits, ids = get_last_logits(prompt_clean)
-last_logits_corr, _ = get_last_logits(prompt_corrupted)
+last_logits_corr, idsCorrupted = get_last_logits(prompt_corrupted)
 
-print("Num tokens:", len(ids))
+print("Num tokens clean:", len(ids))
 print("Tokens:", "/".join([tok.decode(torch.tensor([int(t)])) for t in ids]))
+
+print("Num tokens corrupted:", len(idsCorrupted))
+print("Tokens:", "/".join([tok.decode(torch.tensor([int(t)])) for t in idsCorrupted]))
 
 
 # Display the top-k predicted next tokens for the clean input
@@ -142,3 +146,48 @@ delta_corrupted = last_logits_corr[smith_id].item() - last_logits_corr[jones_id]
 
 print("Delta logit(Smith) - logit(Jones):", delta_clean)
 print("Delta corrupted logit  (Smith) - logit(Jones):", delta_corrupted)
+
+'''
+
+
+
+#test if the layers, vocab size and size of the tensors is correct. this also has the values of a good prompt
+# Input text
+prompt = "Michelle Jones was a top-notch student. Michelle"
+prompt_corrupted = "Jones Jones was a top-notch student. Michelle"
+
+x = tok(prompt).to(device)   # (1, T)
+xCorrupted = tok(prompt_corrupted).to(device)   # (1, T)
+
+
+# ---- Forward pass with activation saving ----
+with torch.no_grad():
+    logits, _ = model(x, save_activations=True, do_patch = False)
+
+clean_acts = [a.clone() for a in model.saved_activations]   # keep a safe copy
+clean_last = model.last_logits.clone()
+
+# ---- Checks ----
+print("Number of layers saved:", len(model.saved_activations))
+print("Activation shape (layer 0):", model.saved_activations[0].shape)
+print("Activation shape (last layer):", model.saved_activations[-1].shape)
+print("Last logits shape:", model.last_logits.shape)
+#end test if the layers, vocab size and size of the tensors is correct
+
+#check a corrupted + patch
+L = 0
+P = 1
+
+# 1) corrupted without patch
+_ , _ = model(xCorrupted, save_activations=True, do_patch=False)
+corr_acts = [a.clone() for a in model.saved_activations]
+
+# 2) corrupted with patch
+logits_tmp, _ = model(xCorrupted, save_activations=True, do_patch=True,  patch_layer=L, patch_pos=P, patch_value=clean_acts[L][P])
+patched_acts = [a.clone() for a in model.saved_activations]
+
+print("diff corrupted vs clean:", (corr_acts[L][P] - clean_acts[L][P]).abs().max().item())
+print("diff patched vs clean:",   (patched_acts[L][P] - clean_acts[L][P]).abs().max().item())
+
+
+

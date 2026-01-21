@@ -150,6 +150,11 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+        #new
+        #activation patching helpers
+        self.saved_activations = None  # will hold list[layer] of tensors (T, C) from a clean run
+        self.last_logits = None  # will hold logits for last position (vocab,)
+
         # init all weights, and apply a special scaled init to the residual projections, per GPT-2 paper
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():
@@ -257,20 +262,41 @@ class GPT(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=train_config.learning_rate, betas=train_config.betas)
         return optimizer
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None,save_activations=False, do_patch=False,  patch_layer=None, patch_pos=None, patch_value=None):
+
         device = idx.device
         b, t = idx.size()
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0) # shape (1, t)
 
+        # If we are saving activations, reset the buffer for this run
+        if save_activations:
+            self.saved_activations = []
+
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (1, t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
-            x = block(x)
+
+        for layer_i, block in enumerate(self.transformer.h):
+            x = block(x)  # output of transformer layer "layer_i"
+
+            # (Phase 4) Patch: replace corrupted activation with clean activation
+            # Patch is applied *after* layer_i output is computed and before next layer uses it.
+            if do_patch and (patch_layer is not None) and (patch_pos is not None) and layer_i == patch_layer:
+                # patch_value is expected to be shape (C,) or (1, C)
+                x[:, patch_pos, :] = patch_value
+
+            # (Phase 3) Save a defensive copy of the activations for this layer
+            if save_activations:
+                # store (T, C) for batch item 0; later you can index by [pos] to get (C,)
+                self.saved_activations.append(x[0].detach().clone())
+
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
+
+        # Save logits for the last position (next-token prediction for the full prompt)
+        self.last_logits = logits[0, -1].detach().clone()
 
         # if we are given some desired targets also calculate the loss
         loss = None
