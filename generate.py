@@ -3,6 +3,9 @@ from transformers import GPT2Tokenizer, GPT2LMHeadModel
 from mingpt.model import GPT
 from mingpt.utils import set_seed
 from mingpt.bpe import BPETokenizer
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+
 set_seed(3407)
 
 use_mingpt = True # use minGPT or huggingface/transformers model?
@@ -55,13 +58,9 @@ def generate(prompt='', num_samples=10, steps=20, do_sample=True):
         print('-' * 80)
         print(out)
 
-
 #generate(prompt='Andrej Karpathy, the', num_samples=10, steps=20)
 
 #new
-
-import torch.nn.functional as F
-
 
 # Use the same BPE tokenizer as the GPT-2 model (minGPT implementation)
 # This ensures a consistent mapping between text tokens and vocabulary indices
