@@ -1,134 +1,158 @@
 import torch
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
+from mingpt.model import GPT
+from mingpt.utils import set_seed
+from mingpt.bpe import BPETokenizer
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-# -----------------------------
-# Token ids we care about
-# -----------------------------
-def token_id_with_space(token_str: str) -> int:
-    """
-    IMPORTANT: include the leading space for mid-sentence tokens, e.g. " Jones", " Smith".
-    """
-    return tok(token_str)[0].item()
+set_seed(3407)
 
-SMITH_ID = token_id_with_space(" Smith")
-JONES_ID = token_id_with_space(" Jones")
+use_mingpt = True # use minGPT or huggingface/transformers model?
+#we are supposed to be using gpt2, so I changed it
+#model_type = 'gpt2-xl'
+model_type = 'gpt2'
 
-# -----------------------------
-# Score (logit difference)
-# -----------------------------
-def score_smith_minus_jones(last_logits: torch.Tensor) -> float:
-    """
-    Returns: logit(" Smith") - logit(" Jones")
-    Positive => model prefers " Smith" over " Jones"
-    Negative => model prefers " Jones" over " Smith"
-    """
-    return (last_logits[SMITH_ID] - last_logits[JONES_ID]).item()
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("Using device:", device)
 
-# -----------------------------
-# Runs
-# -----------------------------
+if use_mingpt:
+    model = GPT.from_pretrained(model_type)
+else:
+    model = GPT2LMHeadModel.from_pretrained(model_type)
+    model.config.pad_token_id = model.config.eos_token_id # suppress a warning
+
+# ship model to device and set to eval mode
+model.to(device)
+model.eval();
+
+
+def generate(prompt='', num_samples=10, steps=20, do_sample=True):
+    # tokenize the input prompt into integer input sequence
+    if use_mingpt:
+        tokenizer = BPETokenizer()
+        if prompt == '':
+            # to create unconditional samples...
+            # manually create a tensor with only the special <|endoftext|> token
+            # similar to what openai's code does here https://github.com/openai/gpt-2/blob/master/src/generate_unconditional_samples.py
+            x = torch.tensor([[tokenizer.encoder.encoder['<|endoftext|>']]], dtype=torch.long)
+        else:
+            x = tokenizer(prompt).to(device)
+    else:
+        tokenizer = GPT2Tokenizer.from_pretrained(model_type)
+        if prompt == '':
+            # to create unconditional samples...
+            # huggingface/transformers tokenizer special cases these strings
+            prompt = '<|endoftext|>'
+        encoded_input = tokenizer(prompt, return_tensors='pt').to(device)
+        x = encoded_input['input_ids']
+
+    # we'll process all desired num_samples in a batch, so expand out the batch dim
+    x = x.expand(num_samples, -1)
+
+    # forward the model `steps` times to get samples, in a batch
+    y = model.generate(x, max_new_tokens=steps, do_sample=do_sample, top_k=40)
+
+    for i in range(num_samples):
+        out = tokenizer.decode(y[i].cpu().squeeze())
+        print('-' * 80)
+        print(out)
+
+#generate(prompt='Andrej Karpathy, the', num_samples=10, steps=20)
+
+#new
+
+# Use the same BPE tokenizer as the GPT-2 model (minGPT implementation)
+# This ensures a consistent mapping between text tokens and vocabulary indices
+tok = BPETokenizer()
+
 @torch.no_grad()
-def run_clean(prompt_clean: str):
+def get_last_logits(prompt: str):
     """
-    Run clean prompt, save activations, return (x_clean, clean_acts, clean_last_logits, score_clean).
-    clean_acts is a list of length n_layers; each element has shape (T, C).
+       Runs a forward pass of the model on the given prompt and
+       returns the logits corresponding to the prediction of the next token.
+
+       Parameters:
+           prompt (str): Input text fed to the model.
+
+       Returns:
+           last_logits (Tensor): Logits for the next-token prediction (vocab_size,).
+           input_ids (Tensor): Tokenized input sequence (T,).
+       """
+    #tokenize the prompt and move it to the same device as the model
+    x = tok(prompt).to(device)     # (1, T)
+
+    #forward pass through the model
+    #logits has shape (1, T, vocab_size)
+    logits, _ = model(x)
+
+    #extract logits for the last token position
+    #these logits correspond to the prediction of the next token
+    return logits[0, -1], x[0]  # last_logits, tokenizer, input_ids_1d
+
+def topk_next_tokens(last_logits, tokenizer, k=20):
     """
-    x_clean = tok(prompt_clean).to(device)  # (1, T)
-    _logits, _ = model(x_clean, save_activations=True, do_patch=False)
+        Displays the top-k most likely next tokens according to the model.
 
-    clean_acts = [a.detach().clone() for a in model.saved_activations]   # list[(T,C)] length=n_layers
-    clean_last = model.last_logits.detach().clone()                      # (vocab_size,)
-    clean_score = score_smith_minus_jones(clean_last)
+        Parameters:
+            last_logits (Tensor): Logits for the next-token prediction.
+            tokenizer: Tokenizer used to decode token ids.
+            k (int): Number of top tokens to display.
+        """
+    #convert logits to probabilities
+    probs = F.softmax(last_logits, dim=-1)
 
-    return x_clean, clean_acts, clean_last, clean_score
+    #select the k tokens with highest probability
+    top_probs, top_ids = torch.topk(probs, k)
 
-@torch.no_grad()
-def run_corrupted(prompt_corrupted: str):
-    """
-    Run corrupted prompt without patch, return (x_corr, corr_last_logits, score_corr).
-    """
-    x_corr = tok(prompt_corrupted).to(device)  # (1, T)
-    _logits, _ = model(x_corr, save_activations=False, do_patch=False)
+    #decode and print the top-k predictions
+    for i, (p, tid) in enumerate(zip(top_probs.tolist(), top_ids.tolist()), 1):
+        toke = tokenizer.decode(torch.tensor([tid]))
+        print(f"{i:2d}. {repr(toke):>12}  p={p:.4f}  id={tid}")
 
-    corr_last = model.last_logits.detach().clone()
-    corr_score = score_smith_minus_jones(corr_last)
-    return x_corr, corr_last, corr_score
 
-@torch.no_grad()
-def run_corrupted_with_patch(x_corr: torch.Tensor, patch_layer: int, patch_pos: int, patch_value: torch.Tensor):
-    """
-    Run corrupted ids with a single activation patch.
-    patch_value should be shape (C,) (i.e., clean_acts[L][P]).
-    Returns (patched_last_logits, score_patched).
-    """
-    _logits, _ = model(
-        x_corr,
-        save_activations=False,
-        do_patch=True,
-        patch_layer=patch_layer,
-        patch_pos=patch_pos,
-        patch_value=patch_value
-    )
+#prompt_clean = "Michelle Jones was a top-notch student. Michelle"
+prompt_clean = "Madrid is the capital city of"
+prompt_corrupted = "Rome is the capital city of"
 
-    patched_last = model.last_logits.detach().clone()
-    patched_score = score_smith_minus_jones(patched_last)
-    return patched_last, patched_score
+# Run the model on both inputs and extract next-token logits
+last_logits, ids = get_last_logits(prompt_clean)
+last_logits_corr, idsCorrupted = get_last_logits(prompt_corrupted)
 
-# -----------------------------
-# MAIN: big loop over (L, P)
-# -----------------------------
-prompt_clean = "Michelle Jones was a top-notch student. Michelle"
-prompt_corrupted = "Michelle Smith was a top-notch student. Michelle"
+print("Num tokens clean:", len(ids))
+print("Tokens:", "/".join([tok.decode(torch.tensor([int(t)])) for t in ids]))
 
-# 1) Clean run: cache activations
-x_clean, clean_acts, clean_last, clean_score = run_clean(prompt_clean)
+print("Num tokens corrupted:", len(idsCorrupted))
+print("Tokens:", "/".join([tok.decode(torch.tensor([int(t)])) for t in idsCorrupted]))
 
-# 2) Corrupted baseline score
-x_corr, corr_last, corr_score = run_corrupted(prompt_corrupted)
 
-# 3) Sanity: token lengths must match for patching positions to line up
-T_clean = x_clean.size(1)
-T_corr = x_corr.size(1)
-assert T_clean == T_corr, f"Token length mismatch: clean T={T_clean} vs corrupted T={T_corr}"
+#display the top 20 predicted next tokens
+print("\n--- TOP-K (CLEAN) ---")
+topk_next_tokens(last_logits, tok, k=20)
 
-n_layers = len(clean_acts)
-T = T_clean
+print("\n--- TOP-K (CORRUPTED) ---")
+topk_next_tokens(last_logits_corr, tok, k=20)
 
-print(f"n_layers={n_layers}, T={T}")
-print(f"clean_score (Smith-Jones)    = {clean_score:.6f}")
-print(f"corrupted_score (Smith-Jones)= {corr_score:.6f}")
+smith_id = tok(" fun")[0].item()
+jones_id = tok(" a")[0].item()
 
-# 4) Heatmap matrix:
-#    store "rescued amount" = patched_score - corr_score
-#    (positive means patch makes model more pro-Smith; negative means more pro-Jones)
-diff_matrix = torch.zeros(n_layers, T, device="cpu")
+print("Smith id:", smith_id, "Jones id:", jones_id)
 
-# Optional: also store patched_score itself
-patched_score_matrix = torch.zeros(n_layers, T, device="cpu")
 
-for L in range(n_layers):
-    for P in range(T):
-        patch_value = clean_acts[L][P]                 # (C,)
-        _patched_last, patched_score = run_corrupted_with_patch(x_corr, L, P, patch_value)
+#compute the logit difference for the clean input
+#negative value means "Jones" is preferred over "Smith"
+delta_clean = last_logits[smith_id].item() - last_logits[jones_id].item()
 
-        diff_matrix[L, P] = patched_score - corr_score
-        patched_score_matrix[L, P] = patched_score
+#compute the logit difference for the corrupted input
+#positive value means "Smith" is preferred over "Jones"
+delta_corrupted = last_logits_corr[smith_id].item() - last_logits_corr[jones_id].item()
 
-# 5) Plot the heatmap (diff relative to corrupted baseline)
-plt.figure()
-plt.title("Activation patching: (patched_score - corrupted_score)\nscore = logit(' Smith') - logit(' Jones')")
-plt.xlabel("Token position P")
-plt.ylabel("Layer L")
-plt.matshow(diff_matrix.numpy(), fignum=0)
-plt.colorbar()
-plt.show()
+print("Delta logit(Smith) - logit(Jones):", delta_clean)
+print("Delta corrupted logit  (Smith) - logit(Jones):", delta_corrupted)
 
-# If you want the raw patched scores instead:
-# plt.figure()
-# plt.title("Patched scores\nscore = logit(' Smith') - logit(' Jones')")
-# plt.xlabel("Token position P")
-# plt.ylabel("Layer L")
-# plt.matshow(patched_score_matrix.numpy(), fignum=0)
-# plt.colorbar()
-# plt.show()
+
+
+
+
+
+

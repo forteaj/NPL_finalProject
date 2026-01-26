@@ -28,18 +28,23 @@ model.eval();
 # This ensures a consistent mapping between text tokens and vocabulary indices
 tok = BPETokenizer()
 
-
-
 #----------
 #PROMPT
 #----------
 
-prompt           = "Michelle Jones was a top-notch student. Michelle"
-prompt_corrupted = "Michelle Smith was a top-notch student. Michelle"
+#prompt           = "Michelle Jones was a top-notch student. Michelle"
+#prompt_corrupted = "Michelle Smith was a top-notch student. Michelle"
 
 # --- IDs ---
-smith_id = tok(" Smith")[0].item()
-jones_id = tok(" Jones")[0].item()
+#smith_id = tok(" Smith")[0].item()
+#jones_id = tok(" Jones")[0].item()
+
+prompt= "Madrid is the capital city of"
+prompt_corrupted = "Rome is the capital city of"
+
+# --- IDs ---
+smith_id = tok(" Spain")[0].item()
+jones_id = tok(" Italy")[0].item()
 
 def score(last_logits):
     return (last_logits[smith_id] - last_logits[jones_id]).item()
@@ -74,7 +79,7 @@ print(f"Corrupted score (Smith - Jones): {corr_score:.4f}")
 
 
 plt.figure(figsize=(8, 6))
-plt.title("Activation patching effect\n(score = logit(' Smith') - logit(' Jones'))")
+plt.title("Activation patching effect")
 plt.xlabel("Token position")
 plt.ylabel("Layer")
 
@@ -82,8 +87,6 @@ plt.matshow(diff.numpy(), fignum=0)
 plt.colorbar(label="Patched score − corrupted score")
 
 plt.show()
-
-
 
 
 #show top tokens before and after patching
@@ -98,9 +101,8 @@ print("=== Corrupted ===")
 _ , _ = model(x_corr, save_activations=False, do_patch=False)
 print_topk(model.last_logits)
 
-print("\n=== Patched (L=4, P=1) ===")
-_ , _ = model(x_corr, save_activations=False, do_patch=True,
-              patch_layer=4, patch_pos=1, patch_value=clean_acts[4][1])
+print("\n=== Patched (L=1, P=1) ===")
+_ , _ = model(x_corr, save_activations=False, do_patch=True, patch_layer=1, patch_pos=1, patch_value=clean_acts[1][1])
 print_topk(model.last_logits)
 
 
